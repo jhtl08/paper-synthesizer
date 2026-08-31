@@ -26,7 +26,7 @@ def parse_latex_to_json(latex, paper_id):
 
     def extract_braced(text, command):
         """Extract the contents of a LaTeX command such as \\title{...}."""
-        pattern = rf'\\{command}\s*\{{'
+        pattern = rf'\\{command}\*?\s*\{{'
         match = re.search(pattern, text)
 
         if not match:
@@ -50,7 +50,7 @@ def parse_latex_to_json(latex, paper_id):
         """Extract all \\author{...} commands."""
         authors = []
 
-        pattern = r'\\author\s*(?:\[[^\]]*\])?\s*\{'
+        pattern = r'\\author\*?\s*(?:\[[^\]]*\])?\s*\{'
         matches = list(re.finditer(pattern, text))
 
         for match in matches:
@@ -115,7 +115,7 @@ def parse_latex_to_json(latex, paper_id):
     # ---------------------------------------------------------
 
     heading_pattern = re.compile(
-        r'\\(section|subsection|subsubsection)\s*\{'
+        r'\\(section|subsection|subsubsection)\*?\s*\{'
     )
 
     matches = list(heading_pattern.finditer(body))
@@ -298,6 +298,8 @@ def parse_latex_to_json(latex, paper_id):
         section_data = {
             "heading": heading,
             "content": section_content,
+            "questions": [],
+            "synthesis": "",
             "subsection": []
         }
 
@@ -361,6 +363,8 @@ def parse_latex_to_json(latex, paper_id):
             subsection_data = {
                 "subheading": subheading,
                 "subcontent": subcontent,
+                "questions": [],
+                "synthesis": "",
                 "subsubsection": []
             }
 
@@ -409,7 +413,9 @@ def parse_latex_to_json(latex, paper_id):
 
                 subsection_data["subsubsection"].append({
                     "subsubheading": subsubheading,
-                    "subsubcontent": subsubcontent
+                    "subsubcontent": subsubcontent,
+                    "questions": [],
+                    "synthesis": ""
                 })
 
             section_data["subsection"].append(
