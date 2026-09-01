@@ -5,11 +5,6 @@ import tempfile
 import urllib.request
 import shutil
 
-# Define ArXiv paper ID
-paper_id = "2608.27454"
-# paper_id = "2608.26247"
-# paper_id = "2608.21267"
-
 def download_pdf(paper_id, output_dir="."):
   os.makedirs(output_dir, exist_ok=True)
   url = f"https://arxiv.org/pdf/{paper_id}.pdf"
@@ -82,7 +77,7 @@ def download_tex(paper_id, output_dir="."):
         os.remove(tmp_path)
 
 
-def download_paper(tex_dir = None, pdf_dir = None):
+def download_paper(paper_id, tex_dir = None, pdf_dir = None):
     if tex_dir is None:
         tex_dir = paper_id
     if pdf_dir is None:
@@ -105,6 +100,3 @@ def download_paper(tex_dir = None, pdf_dir = None):
             download_pdf(paper_id, output_dir=pdf_dir)
     else:
         print("PDF already exists. Skipping download.")
-
-
-download_paper(tex_dir = paper_id, pdf_dir = paper_id)

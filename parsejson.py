@@ -1,17 +1,4 @@
 import re
-import json
-
-# Define ArXiv paper ID
-paper_id = "2608.27454"
-# paper_id = "2608.26247"
-# paper_id = "2608.21267"
-
-folder_dir = f"{paper_id}"  # Folder containing the files
-
-# Define TeX path to parse
-tex_dir = f"{folder_dir}/{paper_id}.tex"  # in this case, same as paper id
-
-
 def parse_latex_to_json(latex, paper_id):
     # ---------------------------------------------------------
     # Helper functions
@@ -298,8 +285,6 @@ def parse_latex_to_json(latex, paper_id):
         section_data = {
             "heading": heading,
             "content": section_content,
-            "questions": [],
-            "synthesis": "",
             "subsection": []
         }
 
@@ -363,8 +348,6 @@ def parse_latex_to_json(latex, paper_id):
             subsection_data = {
                 "subheading": subheading,
                 "subcontent": subcontent,
-                "questions": [],
-                "synthesis": "",
                 "subsubsection": []
             }
 
@@ -413,9 +396,7 @@ def parse_latex_to_json(latex, paper_id):
 
                 subsection_data["subsubsection"].append({
                     "subsubheading": subsubheading,
-                    "subsubcontent": subsubcontent,
-                    "questions": [],
-                    "synthesis": ""
+                    "subsubcontent": subsubcontent
                 })
 
             section_data["subsection"].append(
@@ -437,16 +418,3 @@ def parse_latex_to_json(latex, paper_id):
     }
 
     return result
-
-
-# usage
-
-with open(tex_dir, "r", encoding="utf-8") as f:
-    latex = f.read()
-
-parsed = parse_latex_to_json(latex, paper_id)
-
-with open(f"{folder_dir}/{paper_id}.json", "w", encoding="utf-8") as f:
-    json.dump(parsed, f, indent=2, ensure_ascii=False)
-
-print(f"Saved {paper_id}.json")
