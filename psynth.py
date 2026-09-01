@@ -53,7 +53,7 @@ def main():
         pdf_dir=str(folder_dir)
     )
 
-    print("Paper downloaded successfully.")
+    print("Paper acquired successfully.")
 
     # ============================================================
     # Parse JSON
@@ -89,6 +89,12 @@ def main():
     )
 
     print(f"Synthesis saved to: {markdown_path}")
+
+    # ============================================================
+    # Cleanup intermediate files
+    # ============================================================
+    tex_dir.unlink()
+    json_path.unlink()
 
 
 if __name__ == "__main__":

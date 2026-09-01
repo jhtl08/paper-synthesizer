@@ -89,14 +89,14 @@ def download_paper(paper_id, tex_dir = None, pdf_dir = None):
     tex_path = os.path.join(tex_dir, f"{paper_id}.tex")
 
     if not os.path.exists(tex_path):
-        print("TeX not found. Downloading...")
+        # print("TeX not found. Downloading...")
         download_tex(paper_id, output_dir=tex_dir)
     else:
         print("TeX already exists. Skipping download.")
     # Note download_tex deletes all other files in the folder to keep only largest tex file
 
     if not os.path.exists(pdf_path):
-            print("PDF not found. Downloading...")
+            # print("PDF not found. Downloading...")
             download_pdf(paper_id, output_dir=pdf_dir)
     else:
         print("PDF already exists. Skipping download.")
