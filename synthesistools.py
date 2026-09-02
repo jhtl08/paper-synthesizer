@@ -468,7 +468,7 @@ Connect it to the research problem and overall argument where appropriate.
 
 2. REMARKS
 Provide concise clarification, interpretation, limitations, relationships, or important context that helps the reader understand the section.
-Do not invent information or introduce unsupported criticism.
+Explain here key concepts if applicable. Do not invent information or introduce unsupported criticism.
 
 3. UPDATED RUNNING SYNTHESIS
 Update the preceding running synthesis by incorporating the current section, including relevant information from its subsections and subsubsections.
