@@ -1,6 +1,17 @@
 import json
-from pydantic import BaseModel, Field
+import logging
 import os
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TypedDict
+
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -35,6 +46,7 @@ class Section(BaseModel):
     content: str
     synthesis: str = ""
     remarks: str = ""
+    running_synthesis: str = ""
     subsection: list[Subsection] = Field(default_factory=list)
 
 
@@ -50,6 +62,13 @@ class PaperSynthesis(BaseModel):
     conclusion: str
 
     sections: list[Section] = Field(default_factory=list)
+
+    # Provenance, filled from the arXiv API / CLI
+    source: str = "tex"
+    arxiv_url: str = ""
+    version: str = ""
+    model: str = ""
+    generated_at: str = ""
 
     # Pass 1
     overarching_synthesis: str = ""
@@ -70,7 +89,7 @@ class PaperSynthesis(BaseModel):
     def from_json(cls, json_path: str):
         """Initialize PaperSynthesis from a parsed paper JSON file."""
 
-        with open(json_path, "r", encoding="utf-8") as f:
+        with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
 
         # ----------------------------------------------------
@@ -140,7 +159,12 @@ class PaperSynthesis(BaseModel):
             authors=data.get("authors", []),
             abstract=data.get("abstract", ""),
             conclusion=conclusion,
-            sections=data.get("section", [])
+            sections=data.get("section", []),
+            source=data.get("source", "tex"),
+            arxiv_url=data.get("arxiv_url", ""),
+            version=data.get("version", ""),
+            model=data.get("model") or MODEL,
+            generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
         )
 
 # ============================================================
@@ -177,6 +201,24 @@ def get_indexed_paper_structure(paper: PaperSynthesis) -> str:
 
     return "\n".join(structure)
 
+def select_sections(paper: PaperSynthesis, all_sections: bool = False) -> list[Section]:
+    """Pick the sections Pass 3 should synthesize.
+
+    By default this honours the Pass 1.5 selection; ``--all-sections`` (or an
+    empty/unusable selection) falls back to the full paper.
+    """
+    if all_sections or not paper.relevant_section_indices:
+        return list(paper.sections)
+
+    selected = [
+        paper.sections[index]
+        for index in paper.relevant_section_indices
+        if 0 <= index < len(paper.sections)
+    ]
+
+    return selected or list(paper.sections)
+
+
 def get_relevant_section_content(paper: PaperSynthesis) -> str:
     content = []
 
@@ -203,7 +245,7 @@ def get_relevant_section_content(paper: PaperSynthesis) -> str:
                     if subsubsection.subsubcontent:
                         section_text += subsubsection.subsubcontent + "\n"
 
-            content.append(section_text)
+            content.append(truncate(section_text))
 
     return "\n".join(content)
 
@@ -218,17 +260,188 @@ def get_relevant_section_content(paper: PaperSynthesis) -> str:
 #     temperature=0
 # )
 
-# Using Gemini API Key
-from langchain_google_genai import ChatGoogleGenerativeAI
-from dotenv import load_dotenv
+# Using OpenCode Go (subscription lane, OpenAI-compatible) with DeepSeek V4.1 Flash
 
 load_dotenv()
 
-api_key = os.getenv("GEMINI_API_KEY")
+DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-3.6-flash"
-)
+MODEL = os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash")
+
+# The Go lane asks clients to identify themselves and to send a stable session
+# id per conversation so requests can be routed and prompt-cached.
+CLIENT_USER_AGENT = "paper-synthesizer/0.1"
+SESSION_ID = os.getenv("OPENCODE_SESSION") or uuid.uuid4().hex
+
+_llm = None
+
+
+def default_headers() -> dict[str, str]:
+    return {
+        "User-Agent": CLIENT_USER_AGENT,
+        "x-opencode-session": os.getenv("OPENCODE_SESSION") or SESSION_ID,
+    }
+
+
+def get_llm() -> ChatOpenAI:
+    """Build the OpenCode Go client on first use.
+
+    Deferred until a synthesis pass actually runs so that importing this
+    module, or fetching and parsing a paper, does not require an API key.
+    """
+    global _llm
+
+    if _llm is None:
+        key = os.getenv("OPENCODE_API_KEY")
+        if not key:
+            raise RuntimeError(
+                "OPENCODE_API_KEY is not set. Copy .env.example to .env and add "
+                "the API key from your OpenCode Go subscription "
+                "(https://opencode.ai/console)."
+            )
+
+        _llm = ChatOpenAI(
+            model=MODEL,
+            base_url=os.getenv("OPENCODE_BASE_URL", DEFAULT_BASE_URL),
+            api_key=key,
+            temperature=0,
+            timeout=120,
+            max_retries=4,
+            default_headers=default_headers(),
+        )
+
+    return _llm
+
+
+def preflight(timeout: float = 15.0) -> dict:
+    """Check the key and model access before spending money on tokens.
+
+    A bad key or a model the workspace cannot use otherwise surfaces only
+    after a paper has been downloaded, parsed, and prompted.
+    """
+    import httpx
+
+    key = os.getenv("OPENCODE_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "OPENCODE_API_KEY is not set. Copy .env.example to .env and add "
+            "the API key from your OpenCode Go subscription "
+            "(https://opencode.ai/console)."
+        )
+
+    base_url = os.getenv("OPENCODE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    url = f"{base_url}/models"
+
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {key}", **default_headers()},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"could not reach {url}: {exc}") from exc
+
+    if response.status_code == 401:
+        raise RuntimeError(
+            "OpenCode rejected the API key (401). Check OPENCODE_API_KEY in .env."
+        )
+    if response.status_code == 403:
+        raise RuntimeError(
+            "The key is valid but model access is disabled (403). Enable "
+            f"{MODEL} for your workspace at https://opencode.ai/console."
+        )
+    if response.status_code == 404:
+        raise RuntimeError(
+            f"{url} returned 404. Check OPENCODE_BASE_URL (for the Go lane it "
+            f"is {DEFAULT_BASE_URL})."
+        )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"preflight failed with HTTP {response.status_code}: "
+            f"{response.text[:200]}"
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"{url} did not return JSON; is the base URL correct?") from exc
+
+    models = payload.get("data", payload) if isinstance(payload, dict) else payload
+    model_ids = [model.get("id") for model in models if isinstance(model, dict)]
+
+    if MODEL not in model_ids:
+        available = ", ".join(sorted(m for m in model_ids if m)[:8])
+        raise RuntimeError(
+            f"{MODEL} is not offered on this lane. Set OPENCODE_MODEL to one "
+            f"of: {available}..."
+        )
+
+    return {"model": MODEL, "base_url": base_url, "model_count": len(model_ids)}
+
+
+def structured_output(schema):
+    """Wrap the client so the model answers with `schema`-shaped JSON.
+
+    The Go lane advertises structured-output support, so this uses the
+    OpenAI `response_format` json_schema path. Switch to
+    method="function_calling" if a model ever rejects the strict schema.
+    """
+    return get_llm().with_structured_output(schema, method="json_schema")
+
+
+# DeepSeek V4.1 Flash occasionally answers a long extraction prompt with
+# "..." or a fragment of the instructions. A schema-valid but empty answer
+# would silently corrupt the report, so each pass checks its fields.
+MIN_TEXT_CHARS = 40
+
+
+def _is_degenerate(value: str, min_chars: int) -> bool:
+    stripped = (value or "").strip().strip(".").strip()
+    return len(stripped) < min_chars
+
+
+def checked_structured(schema, prompt: str, fields: tuple[str, ...], min_chars: int = MIN_TEXT_CHARS):
+    """Invoke a structured-output pass and retry once on an unusable answer."""
+    for _ in range(2):
+        result = structured_output(schema).invoke(prompt)
+
+        bad = [
+            field
+            for field in fields
+            if _is_degenerate(getattr(result, field, ""), min_chars)
+        ]
+        if not bad:
+            return result
+
+        log.warning("model returned unusable %s; retrying", ", ".join(bad))
+        prompt = (
+            prompt
+            + "\n\nYour previous response was empty or unusable. Answer every "
+            "field fully, using specific content from the paper."
+        )
+
+    raise RuntimeError(
+        "the model repeatedly returned empty or unusable output for: "
+        + ", ".join(bad)
+    )
+
+
+# Long sections are truncated before prompting: a 60-page paper should not
+# turn one request into six figures of tokens by accident.
+MAX_SECTION_CHARS = int(os.getenv("PSYNTH_MAX_SECTION_CHARS", "24000"))
+
+
+def set_max_section_chars(limit: int) -> None:
+    global MAX_SECTION_CHARS
+    MAX_SECTION_CHARS = int(limit)
+
+
+def truncate(text: str, limit: int | None = None) -> str:
+    """Cut text to ``limit`` characters, marking that it happened."""
+    limit = MAX_SECTION_CHARS if limit is None else int(limit)
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n\n[... truncated ...]"
 
 # ============================================================
 # Clearly Defining LLM Output Schema
@@ -257,15 +470,34 @@ class SectionSynthesisOutput(BaseModel):
 # ============================================================
 # Setting up LangGraph
 # ============================================================
-from typing import TypedDict
 
 class GraphState(TypedDict):
     paper: PaperSynthesis
+    all_sections: bool
+    state_path: str | None
+
+
+def save_state(state_path: str | None, paper: PaperSynthesis) -> None:
+    """Persist synthesis progress so an aborted run can be resumed."""
+    if not state_path:
+        return
+
+    path = Path(state_path)
+    tmp = path.with_name(path.name + ".part")
+    try:
+        tmp.write_text(paper.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 # Pass 1 Node: Take Title, Abstract, Conclusion, and Paper Structure to generate overarching synthesis
 def generate_overarching_synthesis(state: GraphState) -> GraphState:
 
     paper = state["paper"]
+
+    if paper.overarching_synthesis:
+        log.info("Reusing existing overarching synthesis")
+        return state
 
     structure = get_paper_structure(paper)
 
@@ -298,7 +530,7 @@ Keep it concise yet comprehensive.
 Do not invent information that cannot reasonably be inferred from the provided material.
 """
 
-    result = llm.with_structured_output(SynthesisOutput).invoke(prompt)
+    result = checked_structured(SynthesisOutput, prompt, ("synthesis",))
 
     paper.overarching_synthesis = result.synthesis
 
@@ -308,6 +540,10 @@ Do not invent information that cannot reasonably be inferred from the provided m
 def identify_relevant_sections(state: GraphState) -> GraphState:
 
     paper = state["paper"]
+
+    if paper.relevant_section_indices:
+        log.info("Reusing section selection: %s", paper.relevant_section_indices)
+        return state
 
     structure = get_indexed_paper_structure(paper)
 
@@ -345,7 +581,7 @@ The indices must correspond exactly to the numbered top-level sections
 provided above.
 """
 
-    result = llm.with_structured_output(RelevantSections).invoke(prompt)
+    result = structured_output(RelevantSections).invoke(prompt)
 
     paper.relevant_section_indices = result.section_indices
 
@@ -355,6 +591,10 @@ provided above.
 def generate_research_analysis(state: GraphState) -> GraphState:
 
     paper = state["paper"]
+
+    if paper.hypothesis and paper.knowledge_gap and paper.results and paper.implications:
+        log.info("Reusing existing research analysis")
+        return state
 
     relevant_content = get_relevant_section_content(paper)
 
@@ -394,7 +634,11 @@ Distinguish between what the researchers explicitly state and reasonable
 interpretations of their findings.
 """
 
-    result = llm.with_structured_output(ResearchAnalysis).invoke(prompt)
+    result = checked_structured(
+        ResearchAnalysis,
+        prompt,
+        ("knowledge_gap", "hypothesis", "results", "implications"),
+    )
 
     paper.hypothesis = result.hypothesis
     paper.knowledge_gap = result.knowledge_gap
@@ -410,7 +654,42 @@ def generate_running_synthesis(state: GraphState) -> GraphState:
 
     running_synthesis = ""
 
-    for section in paper.sections:
+    sections = select_sections(paper, state.get("all_sections", False))
+
+    log.info(
+        "Synthesizing %s of %s sections",
+        len(sections),
+        len(paper.sections),
+    )
+
+    total = len(sections)
+
+    for position, section in enumerate(sections, start=1):
+
+        if section.synthesis:
+            log.info(
+                "[%s/%s] Skipping %s (already synthesized)",
+                position,
+                total,
+                section.heading,
+            )
+            running_synthesis = section.running_synthesis or running_synthesis
+            continue
+
+        log.info("[%s/%s] Synthesizing %s...", position, total, section.heading)
+
+        subsections = "\n".join(
+            f"SUBSECTION: {sub.subheading}\n{sub.subcontent}\n"
+            + "\n".join(
+                f"SUBSUBSECTION: {subsub.subsubheading}\n{subsub.subsubcontent}"
+                for subsub in sub.subsubsection
+            )
+            for sub in section.subsection
+        ).strip()
+
+        section_body = truncate(
+            f"{section.content}\n\n{subsections}".strip()
+        )
 
         prompt = f"""
 You are progressively synthesizing a research paper for a knowledgeable
@@ -444,21 +723,7 @@ PRECEDING RUNNING SYNTHESIS:
 CURRENT SECTION:
 {section.heading}
 
-{section.content}
-
-SUBSECTIONS AND SUBSUBSECTIONS:
-{chr(10).join(
-    f"""
-SUBSECTION: {sub.subheading}
-{sub.subcontent}
-
-{chr(10).join(
-    f"SUBSUBSECTION: {subsub.subsubheading}\n{subsub.subsubcontent}"
-    for subsub in sub.subsubsection
-)}
-"""
-    for sub in section.subsection
-)}
+{section_body}
 
 Produce:
 
@@ -477,14 +742,21 @@ It should represent the cumulative understanding of the paper so far.
 Keep all three reasonably concise but sufficiently comprehensive.
 """
 
-        result = llm.with_structured_output(
-            SectionSynthesisOutput
-        ).invoke(prompt)
+        result = checked_structured(
+            SectionSynthesisOutput,
+            prompt,
+            ("synthesis", "remarks", "updated_running_synthesis"),
+            min_chars=20,
+        )
 
         section.synthesis = result.synthesis
         section.remarks = result.remarks
 
         running_synthesis = result.updated_running_synthesis
+        section.running_synthesis = running_synthesis
+        paper.running_synthesis = running_synthesis
+
+        save_state(state.get("state_path"), paper)
 
     paper.running_synthesis = running_synthesis
 
@@ -493,8 +765,6 @@ Keep all three reasonably concise but sufficiently comprehensive.
 # ============================================================
 # Building LangGraph Workflow
 # ============================================================
-
-from langgraph.graph import StateGraph, START, END
 
 builder = StateGraph(GraphState)
 
@@ -548,62 +818,122 @@ graph = builder.compile()
 # ============================================================
 # Markdown Output Function
 # ============================================================
-def save_synthesis_markdown(paper: PaperSynthesis, output_path: str):
-    """Save the complete paper synthesis as a structured Markdown file."""
+def _frontmatter_value(value) -> str:
+    """Render a value as a YAML-safe scalar or block list."""
+    if isinstance(value, list):
+        if not value:
+            return " []"
+        return "\n" + "\n".join(
+            f"  - {json.dumps(str(item), ensure_ascii=False)}" for item in value
+        )
+    if isinstance(value, bool):
+        return f" {'true' if value else 'false'}"
+    if isinstance(value, int):
+        return f" {value}"
+    return f" {json.dumps(str(value), ensure_ascii=False)}"
 
-    with open(output_path, "w", encoding="utf-8") as f:
 
-        # ====================================================
-        # Title
-        # ====================================================
+def save_synthesis_markdown(paper: PaperSynthesis, output_path: str) -> str:
+    """Write the synthesis as Markdown with provenance frontmatter.
 
-        f.write(f"# {paper.title}\n\n")
-        f.write(f"**Paper ID:** {paper.paper_id}\n\n")
+    Returns the path written; the caller owns the user-facing confirmation.
+    """
+    synthesized = [section for section in paper.sections if section.synthesis]
+    skipped = [section.heading for section in paper.sections if not section.synthesis]
+    arxiv_url = paper.arxiv_url or f"https://arxiv.org/abs/{paper.paper_id}"
 
-        # ====================================================
-        # Pass 1
-        # ====================================================
+    frontmatter = {
+        "paper_id": paper.paper_id,
+        "title": paper.title,
+        "authors": paper.authors,
+        "arxiv_url": arxiv_url,
+        "version": paper.version,
+        "source": paper.source,
+        "model": paper.model,
+        "generated_at": paper.generated_at,
+        "sections_synthesized": len(synthesized),
+        "sections_available": len(paper.sections),
+    }
 
-        f.write("## Overarching Synthesis\n\n")
-        f.write(f"{paper.overarching_synthesis}\n\n")
+    lines = ["---"]
+    for key, value in frontmatter.items():
+        lines.append(f"{key}:{_frontmatter_value(value)}")
+    lines.extend(["---", ""])
 
-        # ====================================================
-        # Pass 2
-        # ====================================================
+    lines.append(f"# {paper.title}")
+    lines.append("")
 
-        f.write("## Knowledge Gap\n\n")
-        f.write(f"{paper.knowledge_gap}\n\n")
+    if paper.authors:
+        lines.append(f"**Authors:** {', '.join(paper.authors)}")
+    lines.append(f"**Paper ID:** {paper.paper_id}")
+    lines.append(f"**Source:** [{paper.paper_id}]({arxiv_url})")
+    lines.append("")
 
-        f.write("## Hypothesis\n\n")
-        f.write(f"{paper.hypothesis}\n\n")
+    if paper.abstract:
+        lines.append("## Abstract")
+        lines.append("")
+        lines.append(paper.abstract)
+        lines.append("")
 
-        f.write("## Results\n\n")
-        f.write(f"{paper.results}\n\n")
+    lines.append("## Overarching Synthesis")
+    lines.append("")
+    lines.append(paper.overarching_synthesis)
+    lines.append("")
 
-        f.write("## Implications\n\n")
-        f.write(f"{paper.implications}\n\n")
+    lines.append("## Knowledge Gap")
+    lines.append("")
+    lines.append(paper.knowledge_gap)
+    lines.append("")
 
-        # ====================================================
-        # Pass 3 — Final Running Synthesis
-        # ====================================================
+    lines.append("## Hypothesis")
+    lines.append("")
+    lines.append(paper.hypothesis)
+    lines.append("")
 
-        f.write("## Final Running Synthesis\n\n")
-        f.write(f"{paper.running_synthesis}\n\n")
+    lines.append("## Results")
+    lines.append("")
+    lines.append(paper.results)
+    lines.append("")
 
-        # ====================================================
-        # Pass 3 — Individual Sections
-        # ====================================================
+    lines.append("## Implications")
+    lines.append("")
+    lines.append(paper.implications)
+    lines.append("")
 
-        f.write("## Individual Section Synthesis and Remarks\n\n")
+    lines.append("## Final Running Synthesis")
+    lines.append("")
+    lines.append(paper.running_synthesis)
+    lines.append("")
 
-        for i, section in enumerate(paper.sections):
+    lines.append("## Individual Section Synthesis and Remarks")
+    lines.append("")
 
-            f.write(f"### [{i}] {section.heading}\n\n")
+    for index, section in enumerate(paper.sections):
+        if not section.synthesis:
+            continue
 
-            f.write("#### Synthesis\n\n")
-            f.write(f"{section.synthesis}\n\n")
+        lines.append(f"### [{index}] {section.heading}")
+        lines.append("")
+        lines.append("#### Synthesis")
+        lines.append("")
+        lines.append(section.synthesis)
+        lines.append("")
+        lines.append("#### Remarks")
+        lines.append("")
+        lines.append(section.remarks)
+        lines.append("")
 
-            f.write("#### Remarks\n\n")
-            f.write(f"{section.remarks}\n\n")
+    if skipped:
+        lines.append("## Not Synthesized")
+        lines.append("")
+        lines.append(
+            "Coverage was limited to the sections selected for analysis. "
+            "These sections were not synthesized:"
+        )
+        lines.append("")
+        for heading in skipped:
+            lines.append(f"- {heading}")
+        lines.append("")
 
-    print(f"Synthesis saved to: {output_path}")
+    Path(output_path).write_text("\n".join(lines), encoding="utf-8")
+    return output_path

@@ -1,15 +1,58 @@
 import re
+
+# ---------------------------------------------------------
+# Text cleanup helpers
+# ---------------------------------------------------------
+
+# Markup the LLM and the reader should not see: citations, cross-references,
+# labels, footnotes, and inline formatting commands.
+_CITE = re.compile(r"\\cite[a-zA-Z]*\*?\s*(?:\[[^\]]*\]\s*)*\{[^{}]*\}")
+_REF = re.compile(r"\\(?:eq)?ref\*?\s*\{[^{}]*\}")
+_LABEL = re.compile(r"\\label\s*\{[^{}]*\}")
+_FOOTNOTE = re.compile(r"\\(?:footnote|thanks)\s*\{[^{}]*\}")
+_UNWRAP = re.compile(
+    r"\\(?:textbf|emph|textit|texttt|textsc|textrm|textsf|underline)\s*\{([^{}]*)\}"
+)
+_EMPTY_BRACES = re.compile(r"\{\s*\}")
+# Layout/spacing commands carry no meaning in prose and confuse the model.
+_LAYOUT = re.compile(
+    r"\\(?:vspace|hspace)\*?\s*\{[^{}]*\}"
+    r"|\\(?:noindent|centering|newpage|clearpage|small|large|footnotesize|normalsize)\b"
+)
+
+
+def clean_text(text):
+    """Clean unnecessary whitespace while preserving paragraphs."""
+    text = re.sub(r'%.*', '', text)              # Remove LaTeX comments
+    text = re.sub(r'\n\s*\n+', '\n\n', text)    # Normalize paragraphs
+    text = re.sub(r'[ \t]+', ' ', text)          # Normalize spaces
+    return text.strip()
+
+
+def clean_latex_text(text):
+    """Strip LaTeX markup that would otherwise reach the LLM and the reader."""
+    text = _CITE.sub("", text)
+    text = _REF.sub("", text)
+    text = _LABEL.sub("", text)
+    text = _FOOTNOTE.sub("", text)
+
+    # Unwrap nested formatting commands (\\textbf{\\emph{x}} needs two passes).
+    for _ in range(3):
+        unwrapped = _UNWRAP.sub(r"\1", text)
+        if unwrapped == text:
+            break
+        text = unwrapped
+
+    text = _EMPTY_BRACES.sub("", text)
+    text = _LAYOUT.sub("", text)
+    text = text.replace("~", " ")          # LaTeX non-breaking spaces
+    return clean_text(text)
+
+
 def parse_latex_to_json(latex, paper_id):
     # ---------------------------------------------------------
     # Helper functions
     # ---------------------------------------------------------
-
-    def clean_text(text):
-        """Clean unnecessary whitespace while preserving paragraphs."""
-        text = re.sub(r'%.*', '', text)              # Remove LaTeX comments
-        text = re.sub(r'\n\s*\n+', '\n\n', text)    # Normalize paragraphs
-        text = re.sub(r'[ \t]+', ' ', text)          # Normalize spaces
-        return text.strip()
 
     def extract_braced(text, command):
         """Extract the contents of a LaTeX command such as \\title{...}."""
@@ -31,7 +74,7 @@ def parse_latex_to_json(latex, paper_id):
 
             i += 1
 
-        return clean_text(text[start:i - 1])
+        return clean_latex_text(text[start:i - 1])
 
     def extract_authors(text):
         """Extract all \\author{...} commands."""
@@ -53,10 +96,13 @@ def parse_latex_to_json(latex, paper_id):
 
                 i += 1
 
-            author = clean_text(text[start:i - 1])
+            author = clean_latex_text(text[start:i - 1])
 
-            if author:
-                authors.append(author)
+            # \author{A \and B} declares several authors at once.
+            for name in re.split(r"\\and\b", author):
+                name = name.strip()
+                if name:
+                    authors.append(name)
 
         return authors
 
@@ -72,7 +118,7 @@ def parse_latex_to_json(latex, paper_id):
         re.DOTALL
     )
 
-    abstract = clean_text(abstract_match.group(1)) if abstract_match else ""
+    abstract = clean_latex_text(abstract_match.group(1)) if abstract_match else ""
 
     # ---------------------------------------------------------
     # Only parse the actual document body
@@ -132,7 +178,7 @@ def parse_latex_to_json(latex, paper_id):
 
             i += 1
 
-        heading = clean_text(body[start:i - 1])
+        heading = clean_latex_text(body[start:i - 1])
 
         # Content extends until the next heading
         content_start = i
@@ -142,7 +188,7 @@ def parse_latex_to_json(latex, paper_id):
         else:
             content_end = len(body)
 
-        content = clean_text(
+        content = clean_latex_text(
             body[content_start:content_end]
         )
 
@@ -248,7 +294,7 @@ def parse_latex_to_json(latex, paper_id):
                 depth -= 1
             i += 1
 
-        heading = clean_text(body[start:i - 1])
+        heading = clean_latex_text(body[start:i - 1])
 
         section_start = i
 
@@ -276,11 +322,11 @@ def parse_latex_to_json(latex, paper_id):
         section_content = ""
 
         if subsection_matches:
-            section_content = clean_text(
+            section_content = clean_latex_text(
                 section_body[:subsection_matches[0].start()]
             )
         else:
-            section_content = clean_text(section_body)
+            section_content = clean_latex_text(section_body)
 
         section_data = {
             "heading": heading,
@@ -309,7 +355,7 @@ def parse_latex_to_json(latex, paper_id):
                     depth -= 1
                 i += 1
 
-            subheading = clean_text(
+            subheading = clean_latex_text(
                 section_body[start:i - 1]
             )
 
@@ -339,11 +385,11 @@ def parse_latex_to_json(latex, paper_id):
             )
 
             if subsub_matches:
-                subcontent = clean_text(
+                subcontent = clean_latex_text(
                     subsection_body[:subsub_matches[0].start()]
                 )
             else:
-                subcontent = clean_text(subsection_body)
+                subcontent = clean_latex_text(subsection_body)
 
             subsection_data = {
                 "subheading": subheading,
@@ -375,7 +421,7 @@ def parse_latex_to_json(latex, paper_id):
 
                     i += 1
 
-                subsubheading = clean_text(
+                subsubheading = clean_latex_text(
                     subsection_body[start:i - 1]
                 )
 
@@ -388,7 +434,7 @@ def parse_latex_to_json(latex, paper_id):
                 else:
                     subsubcontent_end = len(subsection_body)
 
-                subsubcontent = clean_text(
+                subsubcontent = clean_latex_text(
                     subsection_body[
                         subsubcontent_start:subsubcontent_end
                     ]

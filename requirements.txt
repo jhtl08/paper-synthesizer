@@ -1,0 +1,10 @@
+# Runtime dependencies for paper-synthesizer
+# Prefer: pip install -e .
+# This file stays as a plain-pip fallback.
+
+pydantic==2.14.3
+python-dotenv==1.2.4
+langgraph==1.2.22
+langchain-openai==1.8.0
+pdfminer.six==20260107
+httpx==0.28.1

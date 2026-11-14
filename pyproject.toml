@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-synthesizer"
+version = "0.1.0"
+description = "Download, parse, and synthesize arXiv papers into layered Markdown"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "jhtl08" }]
+keywords = ["arxiv", "research", "summarization", "llm", "langgraph"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Text Processing :: Markup :: LaTeX",
+]
+dependencies = [
+    "pydantic>=2.14,<3",
+    "python-dotenv>=1.2,<2",
+    "langgraph>=1.2,<2",
+    "langchain-openai>=1.8,<2",
+    "pdfminer.six>=20260107",
+    "httpx>=0.28,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+psynth = "psynth:main"
+
+[project.urls]
+Homepage = "https://github.com/jhtl08/paper-synthesizer"
+
+[tool.setuptools]
+py-modules = [
+    "psynth",
+    "fetchpaper",
+    "parsejson",
+    "synthesistools",
+    "arxivmeta",
+    "texsource",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Prompt prose and section comments are long by design; reflowing them would
+# change what the model sees.
+"synthesistools.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
