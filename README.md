@@ -9,12 +9,13 @@ through an **OpenCode Go** subscription.
 
 ## Install
 
-Requires Python 3.12+.
+Requires Python 3.12–3.14. Python 3.15 is not supported yet: `zstandard` (via
+`langgraph-checkpoint`) has no wheels for it.
 
 ```bash
 pipx install .                 # recommended: puts `psynth` on PATH
 # or, in a checkout:
-python -m venv venv && source venv/Scripts/activate
+py -3.14 -m venv venv && source venv/Scripts/activate
 pip install -e ".[dev]"
 ```
 
@@ -135,6 +136,20 @@ automatically. Without the session header, direct calls fail with HTTP 400
 `*-codex` models on the same gateway use `/responses`, so a base-URL swap alone
 is not enough to move to them. The Go lane is a subscription with monthly model
 allowances; the Zen lane (`https://opencode.ai/zen/v1`) is pay-per-token.
+
+## Troubleshooting
+
+`ImportError: cannot import name 'ArgsKwargs' from 'pydantic_core._pydantic_core'`
+(or any other missing symbol from a compiled package) means the virtualenv's
+interpreter changed after packages were installed. Binary wheels are tied to one
+Python version, so re-creating a venv over an existing one leaves them
+unloadable. Delete and rebuild it:
+
+```bash
+rm -rf venv
+py -3.14 -m venv venv
+pip install -e ".[dev]"
+```
 
 ## License
 
